@@ -30,12 +30,18 @@ const s3Client = new S3Client({
 
 const bucketName = process.env.S3_BUCKET_NAME;
 
-// Schemas
+// Updated Schemas with password reset fields
 const userSchema = new mongoose.Schema({
   name: String,
   email: String,
   password: String,
   rollNo: String, // Added rollNo for alumni
+  // Add these new fields for password reset
+  resetToken: String,
+  lastPasswordChange: {
+    type: Date,
+    default: Date.now
+  }
 });
 
 const memorySchema = new mongoose.Schema({
@@ -81,6 +87,11 @@ app.use((req, res, next) => {
   }
   next();
 });
+
+// Simple token generator for password reset
+const generateSimpleToken = () => {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+};
 
 // Multer configuration for memory storage (temporary)
 const storage = multer.memoryStorage();
@@ -281,6 +292,199 @@ app.post('/api/alumni-register', async (req, res) => {
   } catch (error) {
     console.error('Alumni registration error:', error);
     res.status(500).json({ error: 'Error registering alumni' });
+  }
+});
+
+// PASSWORD RESET APIs
+
+// 1. Password Reset Request API
+app.post('/api/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  // Validate IITB email
+  if (!email.endsWith('@iitb.ac.in')) {
+    return res.status(400).json({ error: 'Only @iitb.ac.in emails are allowed' });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found with this email' });
+    }
+
+    // Generate simple reset token
+    const resetToken = generateSimpleToken();
+    
+    // Save reset token to user
+    user.resetToken = resetToken;
+    await user.save();
+
+    res.json({ 
+      message: 'Reset token generated successfully',
+      resetToken: resetToken,
+      email: user.email,
+      name: user.name
+    });
+
+  } catch (error) {
+    console.error('Forgot password error:', error);
+    res.status(500).json({ error: 'Error processing password reset request' });
+  }
+});
+
+// 2. Verify Reset Token API
+app.post('/api/verify-reset-token', async (req, res) => {
+  const { email, resetToken } = req.body;
+  
+  if (!email || !resetToken) {
+    return res.status(400).json({ error: 'Email and reset token are required' });
+  }
+
+  try {
+    const user = await User.findOne({ 
+      email: email,
+      resetToken: resetToken
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid email or reset token' });
+    }
+
+    res.json({ 
+      valid: true, 
+      email: user.email,
+      name: user.name,
+      message: 'Reset token is valid'
+    });
+
+  } catch (error) {
+    console.error('Token verification error:', error);
+    res.status(500).json({ error: 'Error verifying reset token' });
+  }
+});
+
+// 3. Reset Password API
+app.post('/api/reset-password', async (req, res) => {
+  const { email, resetToken, newPassword } = req.body;
+  
+  if (!email || !resetToken || !newPassword) {
+    return res.status(400).json({ error: 'Email, reset token, and new password are required' });
+  }
+
+  if (newPassword.length < 4) {
+    return res.status(400).json({ error: 'Password must be at least 4 characters long' });
+  }
+
+  try {
+    const user = await User.findOne({
+      email: email,
+      resetToken: resetToken
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid email or reset token' });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update user password and clear reset token
+    user.password = hashedPassword;
+    user.resetToken = null;
+    user.lastPasswordChange = new Date();
+    
+    await user.save();
+
+    res.json({ 
+      message: 'Password reset successfully',
+      email: user.email
+    });
+
+  } catch (error) {
+    console.error('Reset password error:', error);
+    res.status(500).json({ error: 'Error resetting password' });
+  }
+});
+
+// 4. Change Password API (for logged-in users)
+app.post('/api/change-password', async (req, res) => {
+  const { email, currentPassword, newPassword } = req.body;
+  
+  if (!email || !currentPassword || !newPassword) {
+    return res.status(400).json({ 
+      error: 'Email, current password, and new password are required' 
+    });
+  }
+
+  if (newPassword.length < 4) {
+    return res.status(400).json({ error: 'New password must be at least 4 characters long' });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Verify current password
+    const isCurrentPasswordValid = await bcrypt.compare(currentPassword, user.password);
+    
+    if (!isCurrentPasswordValid) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+
+    // Hash new password
+    const hashedNewPassword = await bcrypt.hash(newPassword, 10);
+
+    // Update password
+    user.password = hashedNewPassword;
+    user.lastPasswordChange = new Date();
+    
+    await user.save();
+
+    res.json({ 
+      message: 'Password changed successfully',
+      email: user.email
+    });
+
+  } catch (error) {
+    console.error('Change password error:', error);
+    res.status(500).json({ error: 'Error changing password' });
+  }
+});
+
+// 5. Get User Info API
+app.get('/api/user-info/:email', async (req, res) => {
+  const { email } = req.params;
+  
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required' });
+  }
+
+  try {
+    const user = await User.findOne({ email });
+    
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      name: user.name,
+      email: user.email,
+      rollNo: user.rollNo,
+      lastPasswordChange: user.lastPasswordChange,
+      hasResetToken: !!user.resetToken
+    });
+
+  } catch (error) {
+    console.error('User info error:', error);
+    res.status(500).json({ error: 'Error retrieving user information' });
   }
 });
 
@@ -612,7 +816,6 @@ app.post('/api/admin/auto-fix-database', async (req, res) => {
     });
   }
 });
-
 // Enhanced debugging route
 app.get('/api/admin/check-invalid-paths', async (req, res) => {
   try {
